@@ -24,9 +24,15 @@ U8G2_SSD1306_128X64_NONAME_1_SW_I2C u8g2(U8G2_R0,
 
 enum FsmState {
   state_idle,
-  state_acq,
   state_calib,
   state_error,
+};
+
+enum PrgEvent {
+  event_loop,
+  event_btn_pushed,
+  event_print_acq,
+  event_do_acq,
 };
 
 struct acq_result {
@@ -45,23 +51,22 @@ static int screen_print_lines(const char *line1, const char *line2,
 {
   u8g2.firstPage();
   do {
-    /* all graphics commands have to appear within the loop body. */    
-    u8g2.setFont(u8g2_font_luBIS08_tf);   // choose a suitable font
-  
+    u8g2.setFont(u8g2_font_luBIS08_tf);
+    /* all graphics commands have to appear within the loop body. */ 
     if (line1 != NULL) {
-      u8g2.drawStr(0, 10, line1);
+      u8g2.drawStr(0, 15, line1);
     }
     if (line2 != NULL) {
-      u8g2.drawStr(0, 20, line2);
+      u8g2.drawStr(0, 30, line2);
     }
     if (line3 != NULL) {
-      u8g2.drawStr(0, 30, line3);
+      u8g2.drawStr(0, 45, line3);
     }
     if (line4 != NULL) {
-      u8g2.drawStr(0, 40, line4);
+      u8g2.drawStr(0, 60, line4);
     }
   } while (u8g2.nextPage());
-
+  
   return 0;
 }
 
@@ -85,7 +90,7 @@ static int do_acq(struct acq_result *result)
 
   result->temper_filt = t_filter.Filter(result->temper);
   result->pressure_hpa_filt = p_filter.Filter(result->pressure_hpa);
-  result->alti_cm_filt = p_filter.Filter(result->alti_cm);
+  result->alti_cm_filt = a_filter.Filter(result->alti_cm);
 
   return 0;
 }
@@ -99,8 +104,6 @@ static int screen_setup(void)
 
 static int hp20x_setup(void)
 {
-  int res;
-
   /* Reset HP20x_dev*/
   HP20x.begin();
   delay(100);
@@ -110,39 +113,37 @@ static int hp20x_setup(void)
 
 static void print_acq_result(const struct acq_result *result)
 {
-  char line1[128],
-    line2[128],
-    line3[128]/* ,
+  char line1[32],
+    line2[32],
+    line3[32]/* ,
     line4[128] */;
 
   Serial.print(F("Temper: "));
   Serial.print(result->temper);
-  Serial.println(F("C."));
-  /*Serial.println(F("Filter:"));
+  Serial.print(F("C."));
+  Serial.print(F(" - filtered:"));
   Serial.print(result->temper_filt);
-  Serial.println(F("C.\n"));*/
+  Serial.println(F("C."));
 
   Serial.print(F("Pressure: "));
   Serial.print(result->pressure_hpa);
-  Serial.println(F("hPa."));
-  /*Serial.println(F("Filter:"));
+  Serial.print(F("hPa."));
+  Serial.print(F(" - filtered:"));
   Serial.print(result->pressure_hpa_filt);
-  Serial.println(F("hPa\n"));*/
+  Serial.println(F("hPa"));
 
   Serial.print(F("Altitude: "));
   Serial.print(result->alti_cm);
-  Serial.println(F("cm."));
-  /*Serial.println(F("Filter:"));
-  Serial.print(result->alti_cm_filt);
-  Serial.println(F("cm.\n"));
-  Serial.println(F("Filter with calib offset:"));
+  Serial.print(F("cm."));
+  Serial.print(F(" - filtered and off:"));
   Serial.print(result->alti_cm_filt + calibAbsAltiCmOffset);
-  Serial.println(F("cm.\n"));*/
+  Serial.println(F("cm."));
+  
   Serial.println(F("------------------"));
 
-  snprintf(line1, sizeof(line1), "temper: %f C", result->temper_filt);
-  snprintf(line2, sizeof(line2), "pressure: %f hPa", result->pressure_hpa_filt);
-  snprintf(line3, sizeof(line3), "altitude: %f cm", result->alti_cm_filt + calibAbsAltiCmOffset);
+  snprintf(line1, sizeof(line1), "%f C", result->temper_filt);
+  snprintf(line2, sizeof(line2), "%f hPa", result->pressure_hpa_filt);
+  snprintf(line3, sizeof(line3), "%f cm", result->alti_cm_filt + calibAbsAltiCmOffset);
 
   screen_print_lines(line1, line2, line3, NULL);
 }
@@ -150,7 +151,7 @@ static void print_acq_result(const struct acq_result *result)
 static void print_calib(void) {
   char line2[128];
 
-  snprintf(line2, sizeof(line2), "alti_cm_offset: %d\n", calibAbsAltiCmOffset);
+  snprintf(line2, sizeof(line2), "cm_offset: %d\n", calibAbsAltiCmOffset);
   screen_print_lines("Calib settings:", line2, NULL, NULL);
 }
 
@@ -178,26 +179,32 @@ void setup() {
   res = hp20x_setup();
   if (res != 0) {
     log_text("hp20x_setup() failed!\r\n");
-    screen_print_lines("Error!", "cannot setup hp20x device!", NULL, NULL);
+    screen_print_lines("Error!", "hp20x_setup", NULL, NULL);
     prgState = state_error;
   }
 }
 
 void loop() {
   // put your main code here, to run repeatedly:
+  
   static int BtnUpPushed,
     BtnDownPushed;
   static unsigned int changeGuardMs;
-  static unsigned long prevTimeMs,
+  static unsigned long last_btn_push_time_ms,
+    last_acq_print_time_ms,
     last_acq_time_ms;
-  struct acq_result result;
-  unsigned long newTimeMs,
-    ElapsedTimeMs;
+  static struct acq_result last_acq_result;
+  static bool acq_result_avl;
+  unsigned long newTimeMs;
   int newBtnUpPushed,
     newBtnDownPushed,
-    processNewBtnStates,
     res;
+  enum PrgEvent prgEvent;
 
+  do {
+    newTimeMs = millis();
+  } while (newTimeMs == 0); /* we want a value different to 0 */
+  
   /* Read button states and delay the handling of new PUSHED states */
   newBtnUpPushed = (digitalRead(buttonUp) == 0);
   newBtnDownPushed = (digitalRead(buttonDown) == 0);
@@ -205,65 +212,66 @@ void loop() {
 
   if (newBtnUpPushed != BtnUpPushed) {
     BtnUpPushed = newBtnUpPushed;
-    changeGuardMs = 500;
-  } else if (newBtnDownPushed != BtnDownPushed) {
+    last_btn_push_time_ms = newTimeMs;
+  }
+  
+  if (newBtnDownPushed != BtnDownPushed) {
     BtnDownPushed = newBtnDownPushed;
-    changeGuardMs = 500;
+    last_btn_push_time_ms = newTimeMs;
+  }
+  
+  /* generate an event? */
+  if (last_btn_push_time_ms != 0 && newTimeMs - last_btn_push_time_ms >= 500 /* ms */) {
+    prgEvent = event_btn_pushed;
+    last_btn_push_time_ms = 0;
+  } else if (newTimeMs - last_acq_print_time_ms >= 1000 /* ms */) {
+    prgEvent = event_print_acq;
+    last_acq_print_time_ms = newTimeMs;
+  } else if (newTimeMs - last_acq_time_ms >= 50 /* ms */) {
+    prgEvent = event_do_acq;
+    last_acq_time_ms = newTimeMs;
+  } else {
+    prgEvent = event_loop;
   }
 
-  newTimeMs = millis();
-  ElapsedTimeMs = newTimeMs - prevTimeMs;
-  prevTimeMs = millis();
-
-  processNewBtnStates = 0;
-
-  if (changeGuardMs > 0) {
-    if (ElapsedTimeMs >= changeGuardMs) {
-      changeGuardMs = 0;
-      processNewBtnStates = 1;
-    } else {
-      changeGuardMs -= ElapsedTimeMs;
-    }
-  }
-
-  if (!processNewBtnStates) {
-    delay(50 /* ms */);
-    return;
-  }
-
-  log_text("BtnUpPushed:%d BtnDownPushed:%d\r\n", BtnUpPushed, BtnDownPushed);
-
+  /* handling event */
   switch(prgState) {
   case state_error:
     break;
   case state_idle:
-    /* Enter calib mode */ 
-    if (BtnUpPushed && BtnDownPushed) {
-      prgState = state_calib;
-    } else if (BtnUpPushed) {
-      prgState = state_acq;
+    if (prgEvent == event_do_acq) {
+      res = do_acq(&last_acq_result);
+      if (res == 0) {
+        acq_result_avl = true;
+      }
+    } else if (prgEvent == event_print_acq) {
+      if (acq_result_avl)
+        print_acq_result(&last_acq_result);
+    } else if (prgEvent == event_btn_pushed) {
+      if (BtnUpPushed && BtnDownPushed) {
+        /* Enter calib mode */ 
+        prgState = state_calib;
+      }
     }
-    break;
-  case state_acq:
-    res = do_acq(&result);
-    if (res == 0) {
-      print_acq_result(&result);
-    }
-    prgState = state_idle;
     break;
   case state_calib:
     /* Exit calib mode */
-    if (BtnUpPushed && BtnDownPushed) {
-      prgState = state_idle;
-    } else if (BtnUpPushed) {
-      ++calibAbsAltiCmOffset;
-      print_calib();
-    } else if (BtnDownPushed) {
-      --calibAbsAltiCmOffset;
-      print_calib();
+    if (prgEvent == event_btn_pushed) {
+      if (BtnUpPushed && BtnDownPushed) {
+        prgState = state_idle;
+      } else if (BtnUpPushed) {
+        ++calibAbsAltiCmOffset;
+        print_calib();
+      } else if (BtnDownPushed) {
+        --calibAbsAltiCmOffset;
+        print_calib();
+      }
     }
   }
 
-  BtnUpPushed = 0;
-  BtnDownPushed = 0;
+  /* reset for next loop */
+  if (prgEvent == event_btn_pushed) {
+    BtnUpPushed = 0;
+    BtnDownPushed = 0;
+  }
 }
