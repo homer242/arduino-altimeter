@@ -1,14 +1,23 @@
 #include <stdarg.h>
 #include <stdio.h>
 
-static int buttonUp = 2; // buttonUp pin
-static int buttonDown = 3; // buttonDown pin
+#include <HP20x_dev.h>
+#include <KalmanFilter.h>
+#include <Arduino.h>
+#include <U8g2lib.h>
+
+#ifdef U8X8_HAVE_HW_I2C
+#include <Wire.h>
+#endif
+
+static const int buttonUp = 2; // (D2) buttonUp pin
+static const int buttonDown = 3; // (D2) buttonDown pin
+
 static int calibAbsAltiCmOffset;
-static bool hp20x_avlb;
 KalmanFilter t_filter;    //temperature filter
 KalmanFilter p_filter;    //pressure filter
 KalmanFilter a_filter;    //altitude filter
-U8G2_SSD1306_128X64_NONAME_F_SW_I2C u8g2(U8G2_R0,
+U8G2_SSD1306_128X64_NONAME_1_SW_I2C u8g2(U8G2_R0,
                                          /* clock=*/ SCL,
                                          /* data=*/ SDA,
                                          /* reset=*/ U8X8_PIN_NONE);    //Software I2C
@@ -34,23 +43,26 @@ static enum FsmState prgState;
 static int screen_print_lines(const char *line1, const char *line2,
                               const char *line3, const char *line4)
 {
-  u8g2.clearBuffer();                   // clear the internal memory
-  u8g2.setFont(u8g2_font_luBIS08_tf);   // choose a suitable font
+  u8g2.firstPage();
+  do {
+    /* all graphics commands have to appear within the loop body. */    
+    u8g2.setFont(u8g2_font_luBIS08_tf);   // choose a suitable font
+  
+    if (line1 != NULL) {
+      u8g2.drawStr(0, 10, line1);
+    }
+    if (line2 != NULL) {
+      u8g2.drawStr(0, 20, line2);
+    }
+    if (line3 != NULL) {
+      u8g2.drawStr(0, 30, line3);
+    }
+    if (line4 != NULL) {
+      u8g2.drawStr(0, 40, line4);
+    }
+  } while (u8g2.nextPage());
 
-  if (line1 != NULL) {
-    u8g2.drawStr(0, 10, line1);
-  }
-  if (line2 != NULL) {
-    u8g2.drawStr(0, 20, line2);
-  }
-  if (line3 != NULL) {
-    u8g2.drawStr(0, 30, line3);
-  }
-  if (line4 != NULL) {
-    u8g2.drawStr(0, 40, line4);
-  }
-
-  u8g2.sendBuffer();                    // transfer internal memory to the display
+  return 0;
 }
 
 static void log_text(const char *fmt, ...)
@@ -81,6 +93,8 @@ static int do_acq(struct acq_result *result)
 static int screen_setup(void)
 {
   u8g2.begin();
+
+  return 0;
 }
 
 static int hp20x_setup(void)
@@ -91,10 +105,7 @@ static int hp20x_setup(void)
   HP20x.begin();
   delay(100);
 
-  /* Determine HP20x_dev is available or not*/
-  res = HP20x.isAvailable();
-
-  return (res == OK_HP20X_DEV ? 0 : -1);
+  return 0;
 }
 
 static void print_acq_result(const struct acq_result *result)
@@ -104,30 +115,30 @@ static void print_acq_result(const struct acq_result *result)
     line3[128]/* ,
     line4[128] */;
 
-  Serial.println("Temper:");
+  Serial.print(F("Temper: "));
   Serial.print(result->temper);
-  Serial.println("C.\n");
-  Serial.println("Filter:");
+  Serial.println(F("C."));
+  /*Serial.println(F("Filter:"));
   Serial.print(result->temper_filt);
-  Serial.println("C.\n");
+  Serial.println(F("C.\n"));*/
 
-  Serial.println("Pressure:");
+  Serial.print(F("Pressure: "));
   Serial.print(result->pressure_hpa);
-  Serial.println("hPa.\n");
-  Serial.println("Filter:");
+  Serial.println(F("hPa."));
+  /*Serial.println(F("Filter:"));
   Serial.print(result->pressure_hpa_filt);
-  Serial.println("hPa\n");
+  Serial.println(F("hPa\n"));*/
 
-  Serial.println("Altitude:");
+  Serial.print(F("Altitude: "));
   Serial.print(result->alti_cm);
-  Serial.println("cm.\n");
-  Serial.println("Filter:");
+  Serial.println(F("cm."));
+  /*Serial.println(F("Filter:"));
   Serial.print(result->alti_cm_filt);
-  Serial.println("cm.\n");
-  Serial.println("Filter with calib offset:");
+  Serial.println(F("cm.\n"));
+  Serial.println(F("Filter with calib offset:"));
   Serial.print(result->alti_cm_filt + calibAbsAltiCmOffset);
-  Serial.println("cm.\n");
-  Serial.println("------------------\n");
+  Serial.println(F("cm.\n"));*/
+  Serial.println(F("------------------"));
 
   snprintf(line1, sizeof(line1), "temper: %f C", result->temper_filt);
   snprintf(line2, sizeof(line2), "pressure: %f hPa", result->pressure_hpa_filt);
@@ -146,6 +157,9 @@ static void print_calib(void) {
 void setup() {
   int res;
 
+  Serial.begin(9600);
+  log_text("booting...\r\n");
+
   prgState = state_idle;
 
   /* Control buttons */
@@ -154,6 +168,7 @@ void setup() {
 
   /* screen */
   screen_setup();
+  screen_print_lines("Booting!", "Hello!", NULL, NULL);
 
   /* HP20x (Altitude, pressure, temperature)
    * Power up,delay 150ms,until voltage is stable
@@ -161,63 +176,71 @@ void setup() {
   delay(150);
 
   res = hp20x_setup();
-  hp20x_avlb = (res == OK_HP20X_DEV);
-  if (hp20x_avlb) {
-    log_text("HP20x_dev is available.\n");
-  } else {
-    log_text("HP20x_dev isn't available.\n");
-    screen_print_lines("Error!", "HP20x_dev isn't available!", NULL, NULL);
+  if (res != 0) {
+    log_text("hp20x_setup() failed!\r\n");
+    screen_print_lines("Error!", "cannot setup hp20x device!", NULL, NULL);
     prgState = state_error;
   }
 }
 
 void loop() {
   // put your main code here, to run repeatedly:
-  static int BtnStateUp,
-    BtnStateDown;
+  static int BtnUpPushed,
+    BtnDownPushed;
   static unsigned int changeGuardMs;
-  static unsigned long prevTimeMs;
+  static unsigned long prevTimeMs,
+    last_acq_time_ms;
+  struct acq_result result;
   unsigned long newTimeMs,
     ElapsedTimeMs;
-  int newBtnStateUp,
-    newBtnStateDown;
+  int newBtnUpPushed,
+    newBtnDownPushed,
+    processNewBtnStates,
+    res;
 
-  /* Read button states and delay the handling of new states */
-  newBtnStateUp = digitalRead(buttonUp);
-  newBtnStateDown = digitalRead(buttonDown);
+  /* Read button states and delay the handling of new PUSHED states */
+  newBtnUpPushed = (digitalRead(buttonUp) == 0);
+  newBtnDownPushed = (digitalRead(buttonDown) == 0);
+  //log_text("newBtnUpPushed:%d newBtnDownPushed:%d...\r\n", newBtnUpPushed, newBtnDownPushed);
 
-  if (newBtnStateUp != BtnStateUp || newBtnStateDown != BtnStateDown) {
+  if (newBtnUpPushed != BtnUpPushed) {
+    BtnUpPushed = newBtnUpPushed;
     changeGuardMs = 500;
-  } else {
-    changeGuardMs = 0;
+  } else if (newBtnDownPushed != BtnDownPushed) {
+    BtnDownPushed = newBtnDownPushed;
+    changeGuardMs = 500;
   }
 
   newTimeMs = millis();
   ElapsedTimeMs = newTimeMs - prevTimeMs;
   prevTimeMs = millis();
 
-  if (ElapsedTimeMs > changeGuardMs) {
-    changeGuardMs = 0;
-  } else {
-    changeGuardMs -= ElapsedTimeMs;
+  processNewBtnStates = 0;
+
+  if (changeGuardMs > 0) {
+    if (ElapsedTimeMs >= changeGuardMs) {
+      changeGuardMs = 0;
+      processNewBtnStates = 1;
+    } else {
+      changeGuardMs -= ElapsedTimeMs;
+    }
   }
 
-  if (changeGuardMs != 0) {
+  if (!processNewBtnStates) {
     delay(50 /* ms */);
     return;
   }
 
-  BtnStateUp = newBtnStateUp;
-  BtnStateDown = newBtnStateDown;
+  log_text("BtnUpPushed:%d BtnDownPushed:%d\r\n", BtnUpPushed, BtnDownPushed);
 
   switch(prgState) {
   case state_error:
     break;
   case state_idle:
     /* Enter calib mode */ 
-    if (BtnStateUp == 0 && BtnStateDown == 0) {
+    if (BtnUpPushed && BtnDownPushed) {
       prgState = state_calib;
-    } else if (BtnStateUp == 0 && BtnStateDown != 0) {
+    } else if (BtnUpPushed) {
       prgState = state_acq;
     }
     break;
@@ -230,14 +253,17 @@ void loop() {
     break;
   case state_calib:
     /* Exit calib mode */
-    if (BtnStateUp == 0 && BtnStateDown == 0) {
+    if (BtnUpPushed && BtnDownPushed) {
       prgState = state_idle;
-    } else if (BtnStateUp == 0 && BtnStateDown != 0) {
+    } else if (BtnUpPushed) {
       ++calibAbsAltiCmOffset;
       print_calib();
-    } else if (BtnStateUp != 0 && BtnStateDown == 0) {
+    } else if (BtnDownPushed) {
       --calibAbsAltiCmOffset;
       print_calib();
     }
   }
+
+  BtnUpPushed = 0;
+  BtnDownPushed = 0;
 }
